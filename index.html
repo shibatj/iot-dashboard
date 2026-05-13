@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Sensor Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+  :root {
+    --bg: #0f1419;
+    --panel: #1a2029;
+    --panel-2: #232a36;
+    --border: #2a3340;
+    --text: #e6edf3;
+    --muted: #8b95a5;
+    --accent: #4ea8ff;
+    --good: #4ade80;
+    --warn: #fbbf24;
+    --bad:  #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  header {
+    padding: 24px 32px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 600;
+  }
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--good);
+    box-shadow: 0 0 8px var(--good);
+    animation: pulse 2s infinite;
+  }
+  .dot.stale { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+  button {
+    background: var(--panel-2);
+    color: var(--text);
+    border: 1px solid var(--border);
+    padding: 8px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-family: inherit;
+    transition: all 0.15s;
+  }
+  button:hover { background: var(--border); }
+  button.active {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+  main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 16px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 20px;
+  }
+  .card .label {
+    color: var(--muted);
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+  }
+  .card .value {
+    font-size: 32px;
+    font-weight: 600;
+    line-height: 1.1;
+  }
+  .card .unit {
+    color: var(--muted);
+    font-size: 16px;
+    font-weight: 400;
+    margin-left: 4px;
+  }
+  .chart-section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+  }
+  .chart-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .chart-wrap { position: relative; height: 380px; }
+  .error {
+    background: rgba(248, 113, 113, 0.1);
+    border: 1px solid var(--bad);
+    color: var(--bad);
+    padding: 12px 16px;
+    border-radius: 6px;
+    margin-bottom: 16px;
+    display: none;
+  }
+  .error.visible { display: block; }
+  footer {
+    text-align: center;
+    color: var(--muted);
+    font-size: 12px;
+    padding: 16px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📊 ESP32 Sensor Dashboard</h1>
+  <div class="status">
+    <span class="dot" id="statusDot"></span>
+    <span id="lastUpdate">Loading...</span>
+    <button id="refreshBtn">Refresh</button>
+  </div>
+</header>
+
+<main>
+  <div class="error" id="errorBox"></div>
+
+  <section class="cards" id="cards"></section>
+
+  <section class="chart-section">
+    <div class="chart-controls" id="chartControls"></div>
+    <div class="chart-wrap"><canvas id="chart"></canvas></div>
+  </section>
+</main>
+
+<footer>Auto-refresh every 5s &middot; Latest 50 readings shown</footer>
+
+<script>
+const SUPABASE_URL = 'https://lgzgwojotjgiaqihihfu.supabase.co/rest/v1/sensor_data';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imxnemd3b2pvdGpnaWFxaWhpaGZ1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ1MTQwMTAsImV4cCI6MjA5MDA5MDAxMH0.at54v7gfPySRo_Zl_io2z1R0Sy7Ay-yKiWJ0iwnMuwY';
+
+const REFRESH_MS = 5000;
+const ROW_LIMIT = 50;
+
+const SENSORS = [
+  { key: 'dust',  label: 'Dust',          unit: 'µg/m³', decimals: 1, color: '#fbbf24' },
+  { key: 'temp',  label: 'Temperature',   unit: '°C',    decimals: 1, color: '#f87171' },
+  { key: 'humi',  label: 'Humidity',      unit: '%',     decimals: 1, color: '#4ea8ff' },
+  { key: 'pres',  label: 'Pressure',      unit: 'hPa',   decimals: 1, color: '#a78bfa' },
+  { key: 'light', label: 'IR Count',      unit: '',      decimals: 0, color: '#4ade80' },
+  { key: 'sound', label: 'Sound (peak)',  unit: '',      decimals: 0, color: '#34d399' },
+];
+
+let chart;
+let activeSensor = 'temp';
+
+function fmtTime(iso) {
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+function fmtAgo(iso) {
+  const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  return `${Math.floor(sec / 3600)}h ago`;
+}
+
+async function fetchRows() {
+  const url = `${SUPABASE_URL}?select=*&order=created_at.desc&limit=${ROW_LIMIT}`;
+  const res = await fetch(url, {
+    headers: {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+    },
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  return res.json();
+}
+
+function renderCards(latest) {
+  const container = document.getElementById('cards');
+  container.innerHTML = SENSORS.map((s) => {
+    const v = latest?.[s.key];
+    const display = (v == null) ? '—' : Number(v).toFixed(s.decimals);
+    return `
+      <div class="card">
+        <div class="label">${s.label}</div>
+        <div class="value" style="color: ${s.color}">
+          ${display}<span class="unit">${s.unit}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+function renderChartControls() {
+  const wrap = document.getElementById('chartControls');
+  wrap.innerHTML = SENSORS.map((s) => `
+    <button data-key="${s.key}" class="${s.key === activeSensor ? 'active' : ''}">
+      ${s.label}
+    </button>`).join('');
+  wrap.querySelectorAll('button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      activeSensor = btn.dataset.key;
+      wrap.querySelectorAll('button').forEach((b) =>
+        b.classList.toggle('active', b.dataset.key === activeSensor)
+      );
+      updateChart(window._lastRows || []);
+    });
+  });
+}
+
+function updateChart(rowsDescending) {
+  const rows = [...rowsDescending].reverse(); // oldest -> newest
+  const sensor = SENSORS.find((s) => s.key === activeSensor);
+  const labels = rows.map((r) => fmtTime(r.created_at));
+  const data = rows.map((r) => r[activeSensor]);
+
+  if (!chart) {
+    chart = new Chart(document.getElementById('chart'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: sensor.label,
+          data,
+          borderColor: sensor.color,
+          backgroundColor: sensor.color + '33',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 2,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 300 },
+        plugins: {
+          legend: { labels: { color: '#e6edf3' } },
+          tooltip: { mode: 'index', intersect: false },
+        },
+        scales: {
+          x: {
+            ticks: { color: '#8b95a5', maxRotation: 0, autoSkip: true, maxTicksLimit: 8 },
+            grid: { color: '#2a3340' },
+          },
+          y: {
+            ticks: { color: '#8b95a5' },
+            grid: { color: '#2a3340' },
+          },
+        },
+      },
+    });
+  } else {
+    chart.data.labels = labels;
+    chart.data.datasets[0].label = sensor.label;
+    chart.data.datasets[0].data = data;
+    chart.data.datasets[0].borderColor = sensor.color;
+    chart.data.datasets[0].backgroundColor = sensor.color + '33';
+    chart.update();
+  }
+}
+
+function showError(msg) {
+  const box = document.getElementById('errorBox');
+  if (msg) {
+    box.textContent = msg;
+    box.classList.add('visible');
+  } else {
+    box.classList.remove('visible');
+  }
+}
+
+async function refresh() {
+  try {
+    const rows = await fetchRows();
+    window._lastRows = rows;
+    if (rows.length === 0) {
+      showError('No data yet — waiting for ESP32 to upload.');
+      return;
+    }
+    showError(null);
+    renderCards(rows[0]);
+    updateChart(rows);
+
+    const dot = document.getElementById('statusDot');
+    const ageSec = (Date.now() - new Date(rows[0].created_at).getTime()) / 1000;
+    dot.classList.toggle('stale', ageSec > 30);
+    document.getElementById('lastUpdate').textContent =
+      `Last reading: ${fmtAgo(rows[0].created_at)} (${fmtTime(rows[0].created_at)})`;
+  } catch (e) {
+    console.error(e);
+    showError(`Failed to load: ${e.message}`);
+    document.getElementById('statusDot').classList.add('stale');
+  }
+}
+
+document.getElementById('refreshBtn').addEventListener('click', refresh);
+renderChartControls();
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+
+</body>
+</html>
